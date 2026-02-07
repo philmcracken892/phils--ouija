@@ -1,0 +1,1 @@
+ouijaboard = { name = 'ouijaboard', label = 'ouijaboard', weight = 1, type = 'item', image = 'ouijaboard.png', unique = false, useable = true, shouldClose = true, description = 'satanic!' },
