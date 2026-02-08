@@ -4,7 +4,13 @@ Config = {}
 -- ITEM SETTINGS
 ---------------------------------
 Config.ItemName = 'ouijaboard'
-
+---------------------------------
+-- COOLDOWN SETTINGS
+---------------------------------
+Config.Cooldown = {
+    enabled = true,
+    duration = 600, -- Cooldown in seconds (600 = 10 minutes)
+}
 ---------------------------------
 -- SÉANCE SETTINGS
 ---------------------------------
@@ -23,7 +29,7 @@ Config.Timing = {
     initialDelay = 5000, -- Delay before spirit contact begins
     messageDuration = 18000, -- How long each spirit message displays
     pauseBetweenMessages = 4000, -- Silence between messages
-    flickerDuringMessage = true, -- Lights flicker when spirit speaks
+    flickerDuringMessage = false, -- Lights flicker when spirit speaks
 }
 
 ---------------------------------
@@ -31,7 +37,7 @@ Config.Timing = {
 ---------------------------------
 Config.Animation = {
     dict = 'amb_camp@world_camp_fire_sit_ground@male_c@idle_a',
-    anim = 'idle_b', -- or try 'idle_a', 'idle_c' if this doesn't work
+    anim = 'idle_b', 
     flag = 1,
     blendIn = 8.0,
     blendOut = -8.0
@@ -42,11 +48,11 @@ Config.Animation = {
 ---------------------------------
 Config.Flicker = {
     enabled = true,
-    onStart = false, -- Flicker when séance starts
-    onSpiritSpeak = true, -- Flicker when spirit sends message
-    onEnd = true, -- Flicker when séance ends
+    onStart = false, 
+    onSpiritSpeak = false, 
+    onEnd = true, 
     
-    -- Flicker patterns (ms on, ms off)
+    
     patterns = {
         gentle = { {1500, 1300}, {1500, 1300}, {1000, 1500} },
         aggressive = { {1500, 1300}, {1500, 1300}, {1000, 1500} },
@@ -56,16 +62,28 @@ Config.Flicker = {
     }
 }
 
----------------------------------
--- SCREEN EFFECTS (Timecycle for RedM)
----------------------------------
+
 Config.Effects = {
     useTimecycle = true,
-    defaultTimecycle = 'NG_filmic15',  -- Working RedM timecycle
+    defaultTimecycle = 'NG_filmic15',  
     defaultStrength = 0.5
 }
 
--- Spirit-specific screen effects (RedM Compatible)
+---------------------------------
+-- WEATHER SETTINGS
+---------------------------------
+Config.Weather = {
+    enabled = true,
+    type = 'thunderstorm',
+    useWeatherSync = true,
+    restoreAfter = true,
+    setDuringContact = true,
+    transitionDelay = 2000,
+    
+    changeTime = false,  
+}
+
+
 Config.SpiritEffects = {
     friendly = {
         timecycle = 'NG_filmic03',
@@ -176,6 +194,25 @@ Config.Notification = {
 }
 
 ---------------------------------
+-- GLOBAL NOTIFICATION SETTINGS
+---------------------------------
+Config.GlobalNotification = {
+    enabled = true,
+    onStart = true,
+    onEnd = true,
+    
+    messages = {
+        start = 'A dark presence stirs... Someone has opened a portal to the spirit world.',
+        ended = 'The veil between worlds has closed once more...',
+    },
+    
+    icon = 'ghost',
+    iconColor = '#8b0000',
+    duration = 8000,
+    title = '🌙 The Spirit World',
+}
+
+---------------------------------
 -- SPIRIT TYPES AND MESSAGES
 ---------------------------------
 Config.Spirits = {
@@ -233,7 +270,7 @@ Config.Spirits = {
     {
         name = 'Mary',
         type = 'angry',
-        title = '💀 The Wronged Woman',
+        title = '💀 The Wronged spirit',
         icon = 'fire',
         iconColor = '#ff5722',
         introduction = 'A woman\'s scream echoes from nowhere and everywhere at once... The planchette spins wildly before settling into jerky, aggressive movements... You have awoken something that died in agony, something that was never given justice, something that has festered in the dark places between life and death...',
@@ -361,9 +398,9 @@ Config.Spirits = {
 Config.Props = {
     enabled = true,
     
-    -- Ouija board prop (if available in RedM)
+    
     board = {
-        model = 'p_bookbible01x', -- placeholder - change to actual prop if available
+        model = 'p_bookbible01x', 
         offset = {x = 0.0, y = 0.5, z = -0.9},
         rotation = {x = -90.0, y = 0.0, z = 0.0}
     },
