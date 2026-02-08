@@ -1,8 +1,6 @@
 local RSGCore = exports['rsg-core']:GetCoreObject()
 
----------------------------------
--- VARIABLES
----------------------------------
+
 local isInSeance = false
 local seanceStartTime = 0
 local canCancel = false
@@ -16,11 +14,11 @@ local ghostBlip = nil
 local syncedGhostPed = nil
 local syncedProps = {}
 local currentGhostModel = nil
-local ghostVisible = false -- NEW: tracks whether ghost is currently shown
+local ghostVisible = false
+local weatherOverrideActive = false 
+local weatherChanged = false        
+local awaitingCooldownCheck = false
 
----------------------------------
--- GHOST NPC CONFIGURATION
----------------------------------
 local GhostConfig = {
     enabled = true,
     
@@ -50,9 +48,7 @@ local GhostConfig = {
     flickerWithLights = false,
 }
 
----------------------------------
--- UTILITY FUNCTIONS
----------------------------------
+
 
 local function LoadAnimDict(dict)
     if not DoesAnimDictExist(dict) then
@@ -91,13 +87,122 @@ local function LoadModel(model)
     return modelHash
 end
 
----------------------------------
--- SCREEN EFFECTS (CHANGED)
----------------------------------
+
+
+local fogThread = false
+
+
+local function StartFogOverride()
+    if not Config.Weather.extraFog then return end
+    if fogThread then return end
+
+    fogThread = true
+
+    CreateThread(function()
+        while fogThread and isInSeance do
+           
+            local density = Config.Weather.fogDensity or 0.005
+            local distance = Config.Weather.fogDistance or 100.0
+
+            
+            Citizen.InvokeNative(0x29B487C359E19889, density) 
+
+            Wait(0)
+        end
+        fogThread = false
+    end)
+end
+
+local function StopFogOverride()
+    fogThread = false
+end
+
+
+local function SetLocalWeather(weatherType)
+    if weatherOverrideActive then return end
+
+    local weatherHash = GetHashKey(weatherType)
+    weatherOverrideActive = true
+
+    CreateThread(function()
+        while weatherOverrideActive and isInSeance do
+            Citizen.InvokeNative(0x59174F1AFE095B5A, weatherHash, true, false, true, true, false)
+            Wait(500)
+        end
+    end)
+end
+
+local function ClearLocalWeatherOverride()
+    weatherOverrideActive = false
+end
+
+
+local function SetLocalTime(hour, minute)
+    if not Config.Weather.changeTime then return end
+
+    CreateThread(function()
+        while weatherOverrideActive and isInSeance do
+            Citizen.InvokeNative(0x3A52C59FFB2DEED8, hour, minute, 0, 0, true)
+            Wait(1000)
+        end
+    end)
+end
+
+local function SetSeanceWeather(enabled)
+    if not Config.Weather or not Config.Weather.enabled then 
+        
+        return 
+    end
+
+    if enabled then
+        if weatherChanged then 
+            
+            return 
+        end
+        weatherChanged = true
+       
+
+        if Config.Weather.useWeatherSync then
+            TriggerServerEvent('seance:server:setHalloweenWeather')
+        else
+            local weatherType = Config.Weather.type or 'FOG'
+            SetLocalWeather(weatherType)
+
+            if Config.Weather.changeTime then
+                SetLocalTime(Config.Weather.hour or 2, Config.Weather.minute or 0)
+            end
+        end
+
+        StartFogOverride()
+
+        if Config.Weather.transitionDelay and Config.Weather.transitionDelay > 0 then
+            Wait(Config.Weather.transitionDelay)
+        end
+    else
+        if not weatherChanged then 
+            
+            return 
+        end
+        
+       
+        weatherChanged = false
+
+        StopFogOverride()
+
+        if Config.Weather.useWeatherSync then
+            print('[Séance Client] Triggering server resetWeather')
+            TriggerServerEvent('seance:server:resetWeather')
+        else
+            ClearLocalWeatherOverride()
+        end
+    end
+end
+
+
 
 local effectsActive = false
 local shakeActive = false
-local timecycleActive = false -- NEW: separate flag for timecycle
+local timecycleActive = false
 
 local shakeTypes = {
     "VIBRATE_SHAKE",
@@ -108,7 +213,6 @@ local shakeTypes = {
     "DRUNK_SHAKE",
 }
 
--- NEW: Apply timecycle modifier based on spirit type
 local function ApplyTimecycle(spiritType)
     if not Config.Effects or not Config.Effects.useTimecycle then return end
     
@@ -126,7 +230,6 @@ local function ApplyTimecycle(spiritType)
     currentTimecycle = timecycleName
 end
 
--- NEW: Clear timecycle modifier
 local function ClearTimecycle()
     if timecycleActive then
         ClearTimecycleModifier()
@@ -137,10 +240,8 @@ end
 
 local function SetScreenEffect(enabled, spiritType)
     if enabled then
-        -- CHANGED: Always update timecycle even if shake is already running
         ApplyTimecycle(spiritType)
         
-        -- Only start shake if not already active
         if effectsActive then return end
         effectsActive = true
         
@@ -211,21 +312,16 @@ local function SetScreenEffect(enabled, spiritType)
         effectsActive = false
         shakeActive = false
         StopGameplayCamShaking(true)
-        ClearTimecycle() -- CHANGED: clear timecycle on disable
+        ClearTimecycle()
     end
 end
 
--- CHANGED: Only stops shake, keeps timecycle active
 local function StopScreenShake()
     shakeActive = false
     StopGameplayCamShaking(true)
-    -- NOTE: effectsActive stays true so timecycle persists
-    -- NOTE: timecycle stays active intentionally
 end
 
----------------------------------
--- SPIRIT & MODEL FUNCTIONS
----------------------------------
+
 
 local function SelectRandomSpirit()
     if #Config.Spirits == 0 then
@@ -252,9 +348,7 @@ local function GetGhostModel(spiritType)
     return modelList[math.random(1, #modelList)]
 end
 
----------------------------------
--- LIGHT FUNCTIONS (CHANGED)
----------------------------------
+
 
 local function SetLightsOff(state)
     targetLightState = state
@@ -270,7 +364,6 @@ CreateThread(function()
     end
 end)
 
--- CHANGED: Skip flickering if ghost is visible
 local function FlickerLightsBlocking(patternName)
     if not Config.Flicker or not Config.Flicker.enabled then 
         return 
@@ -280,7 +373,6 @@ local function FlickerLightsBlocking(patternName)
         return 
     end
     
-    -- NEW: Don't flicker while ghost is on screen
     if ghostVisible then
         return
     end
@@ -299,13 +391,13 @@ local function FlickerLightsBlocking(patternName)
     
     for i, timing in ipairs(pattern) do
         if not isInSeance then break end
-        if ghostVisible then break end -- NEW: stop mid-flicker if ghost appeared
+        if ghostVisible then break end
         
         SetArtificialLightsState(false)
         Wait(timing[1])
         
         if not isInSeance then break end
-        if ghostVisible then break end -- NEW
+        if ghostVisible then break end
         
         SetArtificialLightsState(true)
         Wait(timing[2])
@@ -319,26 +411,24 @@ local function FlickerLightsBlocking(patternName)
     isFlickering = false
 end
 
--- CHANGED: Skip flickering if ghost is visible
 local function FlickerLights(patternName)
     if not Config.Flicker or not Config.Flicker.enabled then return end
     if isFlickering then return end
-    if ghostVisible then return end -- NEW
+    if ghostVisible then return end
     
     CreateThread(function()
         FlickerLightsBlocking(patternName)
     end)
 end
 
--- CHANGED: Skip flickering if ghost is visible
 local function QuickFlicker(times)
-    if ghostVisible then return end -- NEW
+    if ghostVisible then return end
     
     times = times or 3
     isFlickering = true
     
     for i = 1, times do
-        if ghostVisible then break end -- NEW
+        if ghostVisible then break end
         SetArtificialLightsState(false)
         Wait(100)
         SetArtificialLightsState(true)
@@ -354,9 +444,7 @@ local function QuickFlicker(times)
     isFlickering = false
 end
 
----------------------------------
--- GHOST SPAWN FUNCTIONS
----------------------------------
+
 
 local function GetGhostSpawnPosition()
     local ped = PlayerPedId()
@@ -431,8 +519,6 @@ local function FadeGhostIn(duration)
     local stepTime = duration / steps
     local alphaStep = GhostConfig.transparency / steps
     
-    -- REMOVED: no longer flicker during fade in (ghostVisible will be true)
-    
     for i = 1, steps do
         if not isInSeance or not ghostPed or not DoesEntityExist(ghostPed) then break end
         
@@ -495,11 +581,9 @@ local function StartGhostFlickerEffect()
     end)
 end
 
--- CHANGED: Sets ghostVisible = true after ghost is fully faded in
 local function ShowGhostAppearance(spiritType)
     if not GhostConfig.enabled then return end
     
-    -- Entrance flicker happens BEFORE ghost is visible
     FlickerLightsBlocking('slow')
     
     if Config.EnableGroupSeance then
@@ -516,7 +600,6 @@ local function ShowGhostAppearance(spiritType)
     
     StopScreenShake()
     
-    -- NEW: Mark ghost as visible BEFORE fade in so lights stay stable
     ghostVisible = true
     
     if Config.EnableGroupSeance then
@@ -538,17 +621,13 @@ local function ShowGhostAppearance(spiritType)
     FadeGhostIn(GhostConfig.fadeInTime)
 end
 
--- CHANGED: Sets ghostVisible = false BEFORE exit flicker so it can play
 local function DismissGhost()
     if not ghostPed or not DoesEntityExist(ghostPed) then 
-        ghostVisible = false -- NEW: ensure flag is reset
+        ghostVisible = false
         return 
     end
     
-    -- NEW: Allow flickering again before the exit effect
     ghostVisible = false
-    
-    -- Reset effectsActive so shake can restart for next spirit
     effectsActive = false
     
     FlickerLightsBlocking('slow')
@@ -566,9 +645,7 @@ local function DismissGhost()
     end
 end
 
----------------------------------
--- PROPS FUNCTIONS
----------------------------------
+
 
 local function SpawnSeanceProps()
     if not Config.Props or not Config.Props.enabled then return end
@@ -628,9 +705,7 @@ local function DeleteSeanceProps()
     end
 end
 
----------------------------------
--- ANIMATION
----------------------------------
+
 
 local function StartSeanceAnimation()
     local ped = PlayerPedId()
@@ -674,18 +749,14 @@ local function PlayHandsUpAnimation()
     return true
 end
 
----------------------------------
--- PLAYER STATE
----------------------------------
+
 
 local function SetPlayerFrozen(frozen)
     local ped = PlayerPedId()
     SetEntityInvincible(ped, frozen and not Config.CanBeDamaged)
 end
 
----------------------------------
--- NOTIFICATIONS
----------------------------------
+
 
 local function SendNotify(message, notifyType, icon, color, duration, title)
     lib.notify({
@@ -727,19 +798,24 @@ local function BroadcastToNearby(message, spiritTitle, icon, color, duration)
     end
 end
 
----------------------------------
--- END SÉANCE (CHANGED)
----------------------------------
-
 local function EndSeance(forced)
     if not isInSeance then return end
     
+    
+    local wasInSeance = isInSeance
+    
     isInSeance = false
+    
+    
+    if Config.Cooldown and Config.Cooldown.enabled then
+        TriggerServerEvent('seance:server:setCooldown')
+    end
+    
     canCancel = false
     currentSpirit = nil
     isFlickering = false
     targetLightState = false
-    ghostVisible = false -- NEW: reset ghost flag
+    ghostVisible = false
     
     DismissGhost()
     
@@ -751,13 +827,19 @@ local function EndSeance(forced)
     
     StopSeanceAnimation()
     SetArtificialLightsState(false)
-    SetScreenEffect(false) -- CHANGED: this now also clears timecycle
+    SetScreenEffect(false)
     
     if Config.FreezePlayer then
         SetPlayerFrozen(false)
     end
     
     DeleteSeanceProps()
+    
+   
+    if wasInSeance then
+        
+        SetSeanceWeather(false)
+    end
     
     Wait(500)
     if forced then
@@ -777,6 +859,10 @@ local function EndSeance(forced)
             5000
         )
     end
+	
+	if Config.GlobalNotification and Config.GlobalNotification.enabled then
+        TriggerServerEvent('seance:server:globalNotify', 'ended')
+    end
 end
 
 local function RunSpiritCommunication()
@@ -795,6 +881,11 @@ local function RunSpiritCommunication()
     
     SetScreenEffect(true, currentSpirit.type)
     
+    -- WEATHER: Change weather at spirit contact if configured
+    if Config.Weather and Config.Weather.enabled and Config.Weather.setDuringContact then
+        SetSeanceWeather(true)
+    end
+    
     local flickerPattern = 'slow'
     
     SendNotify(
@@ -809,12 +900,9 @@ local function RunSpiritCommunication()
     if not isInSeance then return end
     
     ShowGhostAppearance(currentSpirit.type)
-    -- ghostVisible is now true — no more light flickering until ghost is dismissed
     
     Wait(1000)
     if not isInSeance then return end
-    
-    -- CHANGED: removed flicker call here — ghost is visible, lights stay stable
     
     local introDuration = SendSpiritNotify(
         currentSpirit.introduction,
@@ -838,7 +926,6 @@ local function RunSpiritCommunication()
         local message = currentSpirit.messages[messageIndex]
         
         if message then
-            -- CHANGED: flicker calls here are now safely blocked by ghostVisible flag
             if Config.Flicker and Config.Flicker.onSpiritSpeak and Config.Timing.flickerDuringMessage then
                 FlickerLightsBlocking(flickerPattern)
             end
@@ -864,7 +951,6 @@ local function RunSpiritCommunication()
             
             if messageIndex > #currentSpirit.messages and messagesShown < maxMessages - 2 then
                 DismissGhost()
-                -- ghostVisible is now false — flickering allowed again
                 
                 SendNotify(
                     Config.Messages.spiritChanges,
@@ -887,12 +973,9 @@ local function RunSpiritCommunication()
                     SetScreenEffect(true, currentSpirit.type)
                     
                     ShowGhostAppearance(currentSpirit.type)
-                    -- ghostVisible is true again — lights stable
                     
                     Wait(1000)
                     if not isInSeance then break end
-                    
-                    -- CHANGED: removed flicker call — ghost is visible
                     
                     local introD = SendSpiritNotify(
                         currentSpirit.introduction,
@@ -918,7 +1001,6 @@ local function RunSpiritCommunication()
     
     if isInSeance then
         DismissGhost()
-        -- ghostVisible is now false — exit flicker plays
         
         FlickerLightsBlocking('slow')
         
@@ -963,7 +1045,8 @@ local function StartSeance()
     currentSpirit = nil
     isFlickering = false
     targetLightState = false
-    ghostVisible = false -- NEW: ensure clean state
+    ghostVisible = false
+    weatherChanged = false
     
     SendNotify(
         Config.Messages.preparing,
@@ -1025,6 +1108,15 @@ local function StartSeance()
     
     SetLightsOff(true)
     SetScreenEffect(true, 'mysterious')
+	
+	if Config.GlobalNotification and Config.GlobalNotification.enabled then
+        TriggerServerEvent('seance:server:globalNotify', 'start')
+    end
+    
+    -- WEATHER: Change weather at séance start if configured (not during contact)
+    if Config.Weather and Config.Weather.enabled and not Config.Weather.setDuringContact then
+        SetSeanceWeather(true)
+    end
     
     SendNotify(
         Config.Messages.calling,
@@ -1114,7 +1206,49 @@ end
 ---------------------------------
 
 RegisterNetEvent('seance:client:useOuijaBoard', function()
-    StartSeance()
+    if awaitingCooldownCheck then return end
+    
+    if isInSeance then
+        SendNotify(Config.Messages.alreadyInSeance, 'error', Config.Notification.icons.warning, Config.Notification.colors.warning, 3000)
+        return
+    end
+    
+   
+    if Config.Cooldown and Config.Cooldown.enabled then
+        awaitingCooldownCheck = true
+        TriggerServerEvent('seance:server:checkCooldown')
+    else
+        StartSeance()
+    end
+end)
+
+RegisterNetEvent('seance:client:cooldownResult', function(onCooldown, remainingSeconds)
+    awaitingCooldownCheck = false
+    
+    if onCooldown then
+        local minutes = math.floor(remainingSeconds / 60)
+        local seconds = remainingSeconds % 60
+        local timeStr = ""
+        
+        if minutes > 0 then
+            timeStr = minutes .. " minute" .. (minutes > 1 and "s" or "")
+            if seconds > 0 then
+                timeStr = timeStr .. " and " .. seconds .. " second" .. (seconds > 1 and "s" or "")
+            end
+        else
+            timeStr = seconds .. " second" .. (seconds > 1 and "s" or "")
+        end
+        
+        SendNotify(
+            'The spirits need rest. Try again in ' .. timeStr .. '.',
+            'error',
+            Config.Notification.icons.warning,
+            Config.Notification.colors.warning,
+            5000
+        )
+    else
+        StartSeance()
+    end
 end)
 
 RegisterNetEvent('seance:client:receiveBroadcast', function(data)
@@ -1287,8 +1421,20 @@ RegisterNetEvent('seance:client:cleanupSyncedProps', function()
     syncedProps = {}
 end)
 
+RegisterNetEvent('seance:client:globalNotify', function(data)
+    lib.notify({
+        title = data.title or '🌙 The Spirit World',
+        description = data.message,
+        type = 'info',
+        duration = data.duration or 8000,
+        icon = data.icon or 'ghost',
+        iconColor = data.iconColor or '#8b0000',
+        position = Config.Notification.position
+    })
+end)
+
 ---------------------------------
--- CLEANUP (CHANGED)
+-- CLEANUP
 ---------------------------------
 
 AddEventHandler('onResourceStop', function(resource)
@@ -1299,16 +1445,25 @@ AddEventHandler('onResourceStop', function(resource)
             currentSpirit = nil
             isFlickering = false
             targetLightState = false
-            ghostVisible = false -- NEW
+            ghostVisible = false
             StopSeanceAnimation()
-            SetScreenEffect(false) -- clears timecycle too
+            SetScreenEffect(false)
             SetPlayerFrozen(false)
             SetArtificialLightsState(false)
             DeleteSeanceProps()
             DeleteGhost()
         end
         
-        ClearTimecycle() -- NEW: safety clear
+        -- WEATHER: Always clean up weather on resource stop
+        if weatherChanged then
+            weatherChanged = false
+            weatherOverrideActive = false
+            if Config.Weather and Config.Weather.useWeatherSync then
+                TriggerServerEvent('seance:server:resetWeather')
+            end
+        end
+        ClearLocalWeatherOverride()
+        ClearTimecycle()
         
         if syncedGhostPed and DoesEntityExist(syncedGhostPed) then
             DeleteEntity(syncedGhostPed)
@@ -1346,3 +1501,4 @@ CreateThread(function()
         end
     end
 end)
+
