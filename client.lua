@@ -15,7 +15,8 @@ local ghostPed = nil
 local ghostBlip = nil
 local syncedGhostPed = nil
 local syncedProps = {}
-local currentGhostModel = nil -- Store the current ghost model for syncing
+local currentGhostModel = nil
+local ghostVisible = false -- NEW: tracks whether ghost is currently shown
 
 ---------------------------------
 -- GHOST NPC CONFIGURATION
@@ -38,22 +39,15 @@ local GhostConfig = {
         }
     },
     
-    -- Appearance
     fadeInTime = 3000,
     fadeOutTime = 2000,
     stayTime = 8000,
     transparency = 200,
-    
-    -- Position
     distance = 2.0,
-    
-    -- Animation
     useAnimation = true,
     animDict = "script_common@other@unapproved",
     animName = "cry_loop",
-    
-    -- Effects
-    flickerWithLights = true,
+    flickerWithLights = false,
 }
 
 ---------------------------------
@@ -98,11 +92,12 @@ local function LoadModel(model)
 end
 
 ---------------------------------
--- SCREEN EFFECTS
+-- SCREEN EFFECTS (CHANGED)
 ---------------------------------
 
 local effectsActive = false
 local shakeActive = false
+local timecycleActive = false -- NEW: separate flag for timecycle
 
 local shakeTypes = {
     "VIBRATE_SHAKE",
@@ -113,8 +108,39 @@ local shakeTypes = {
     "DRUNK_SHAKE",
 }
 
+-- NEW: Apply timecycle modifier based on spirit type
+local function ApplyTimecycle(spiritType)
+    if not Config.Effects or not Config.Effects.useTimecycle then return end
+    
+    local timecycleName = Config.Effects.defaultTimecycle
+    local strength = Config.Effects.defaultStrength
+    
+    if spiritType and Config.SpiritEffects and Config.SpiritEffects[spiritType] then
+        timecycleName = Config.SpiritEffects[spiritType].timecycle or timecycleName
+        strength = Config.SpiritEffects[spiritType].strength or strength
+    end
+    
+    SetTimecycleModifier(timecycleName)
+    SetTimecycleModifierStrength(strength)
+    timecycleActive = true
+    currentTimecycle = timecycleName
+end
+
+-- NEW: Clear timecycle modifier
+local function ClearTimecycle()
+    if timecycleActive then
+        ClearTimecycleModifier()
+        timecycleActive = false
+        currentTimecycle = nil
+    end
+end
+
 local function SetScreenEffect(enabled, spiritType)
     if enabled then
+        -- CHANGED: Always update timecycle even if shake is already running
+        ApplyTimecycle(spiritType)
+        
+        -- Only start shake if not already active
         if effectsActive then return end
         effectsActive = true
         
@@ -185,14 +211,16 @@ local function SetScreenEffect(enabled, spiritType)
         effectsActive = false
         shakeActive = false
         StopGameplayCamShaking(true)
+        ClearTimecycle() -- CHANGED: clear timecycle on disable
     end
 end
 
--- MUST BE DEFINED HERE - BEFORE GHOST FUNCTIONS
+-- CHANGED: Only stops shake, keeps timecycle active
 local function StopScreenShake()
     shakeActive = false
-    effectsActive = false
     StopGameplayCamShaking(true)
+    -- NOTE: effectsActive stays true so timecycle persists
+    -- NOTE: timecycle stays active intentionally
 end
 
 ---------------------------------
@@ -225,7 +253,7 @@ local function GetGhostModel(spiritType)
 end
 
 ---------------------------------
--- LIGHT FUNCTIONS
+-- LIGHT FUNCTIONS (CHANGED)
 ---------------------------------
 
 local function SetLightsOff(state)
@@ -242,6 +270,7 @@ CreateThread(function()
     end
 end)
 
+-- CHANGED: Skip flickering if ghost is visible
 local function FlickerLightsBlocking(patternName)
     if not Config.Flicker or not Config.Flicker.enabled then 
         return 
@@ -249,6 +278,11 @@ local function FlickerLightsBlocking(patternName)
     
     if isFlickering then 
         return 
+    end
+    
+    -- NEW: Don't flicker while ghost is on screen
+    if ghostVisible then
+        return
     end
     
     isFlickering = true
@@ -265,11 +299,13 @@ local function FlickerLightsBlocking(patternName)
     
     for i, timing in ipairs(pattern) do
         if not isInSeance then break end
+        if ghostVisible then break end -- NEW: stop mid-flicker if ghost appeared
         
         SetArtificialLightsState(false)
         Wait(timing[1])
         
         if not isInSeance then break end
+        if ghostVisible then break end -- NEW
         
         SetArtificialLightsState(true)
         Wait(timing[2])
@@ -283,20 +319,26 @@ local function FlickerLightsBlocking(patternName)
     isFlickering = false
 end
 
+-- CHANGED: Skip flickering if ghost is visible
 local function FlickerLights(patternName)
     if not Config.Flicker or not Config.Flicker.enabled then return end
     if isFlickering then return end
+    if ghostVisible then return end -- NEW
     
     CreateThread(function()
         FlickerLightsBlocking(patternName)
     end)
 end
 
+-- CHANGED: Skip flickering if ghost is visible
 local function QuickFlicker(times)
+    if ghostVisible then return end -- NEW
+    
     times = times or 3
     isFlickering = true
     
     for i = 1, times do
+        if ghostVisible then break end -- NEW
         SetArtificialLightsState(false)
         Wait(100)
         SetArtificialLightsState(true)
@@ -345,7 +387,6 @@ local function SpawnGhost(spiritType)
         ghostPed = nil
     end
     
-    -- Get and store the model name for syncing
     currentGhostModel = GetGhostModel(spiritType)
     local modelHash = LoadModel(currentGhostModel)
     
@@ -390,9 +431,7 @@ local function FadeGhostIn(duration)
     local stepTime = duration / steps
     local alphaStep = GhostConfig.transparency / steps
     
-    if GhostConfig.flickerWithLights then
-        FlickerLights('slow')
-    end
+    -- REMOVED: no longer flicker during fade in (ghostVisible will be true)
     
     for i = 1, steps do
         if not isInSeance or not ghostPed or not DoesEntityExist(ghostPed) then break end
@@ -417,10 +456,6 @@ local function FadeGhostOut(duration)
     local steps = 20
     local stepTime = duration / steps
     local alphaStep = currentAlpha / steps
-    
-    if GhostConfig.flickerWithLights then
-        FlickerLights('slow')
-    end
     
     for i = 1, steps do
         if not ghostPed or not DoesEntityExist(ghostPed) then break end
@@ -460,12 +495,13 @@ local function StartGhostFlickerEffect()
     end)
 end
 
+-- CHANGED: Sets ghostVisible = true after ghost is fully faded in
 local function ShowGhostAppearance(spiritType)
     if not GhostConfig.enabled then return end
     
+    -- Entrance flicker happens BEFORE ghost is visible
     FlickerLightsBlocking('slow')
     
-    -- Sync flicker to nearby players
     if Config.EnableGroupSeance then
         TriggerServerEvent('seance:server:syncFlicker', 'slow')
     end
@@ -478,10 +514,11 @@ local function ShowGhostAppearance(spiritType)
         return
     end
     
-    -- Stop shake when ghost appears
     StopScreenShake()
     
-    -- Sync ghost to nearby players (use stored model name)
+    -- NEW: Mark ghost as visible BEFORE fade in so lights stay stable
+    ghostVisible = true
+    
     if Config.EnableGroupSeance then
         local spawnPos, spawnHeading = GetGhostSpawnPosition()
         
@@ -501,13 +538,21 @@ local function ShowGhostAppearance(spiritType)
     FadeGhostIn(GhostConfig.fadeInTime)
 end
 
--- ONLY ONE DismissGhost function
+-- CHANGED: Sets ghostVisible = false BEFORE exit flicker so it can play
 local function DismissGhost()
-    if not ghostPed or not DoesEntityExist(ghostPed) then return end
+    if not ghostPed or not DoesEntityExist(ghostPed) then 
+        ghostVisible = false -- NEW: ensure flag is reset
+        return 
+    end
+    
+    -- NEW: Allow flickering again before the exit effect
+    ghostVisible = false
+    
+    -- Reset effectsActive so shake can restart for next spirit
+    effectsActive = false
     
     FlickerLightsBlocking('slow')
     
-    -- Sync flicker to nearby players
     if Config.EnableGroupSeance then
         TriggerServerEvent('seance:server:syncFlicker', 'slow')
     end
@@ -516,7 +561,6 @@ local function DismissGhost()
     
     DeleteGhost()
     
-    -- Sync ghost dismiss to nearby players
     if Config.EnableGroupSeance then
         TriggerServerEvent('seance:server:dismissGhost')
     end
@@ -562,7 +606,6 @@ local function SpawnSeanceProps()
             end
         end
         
-        -- Sync props to nearby players
         if Config.EnableGroupSeance and #candlePositions > 0 then
             TriggerServerEvent('seance:server:syncProps', {
                 model = Config.Props.candles.model,
@@ -580,7 +623,6 @@ local function DeleteSeanceProps()
     end
     spawnedProps = {}
     
-    -- Sync cleanup to nearby players
     if Config.EnableGroupSeance then
         TriggerServerEvent('seance:server:cleanupProps')
     end
@@ -592,10 +634,7 @@ end
 
 local function StartSeanceAnimation()
     local ped = PlayerPedId()
-    
-   
     TaskStartScenarioInPlace(ped, GetHashKey('WORLD_HUMAN_CROUCH_INSPECT'), -1, true, false, false, false)
-    
     return true
 end
 
@@ -609,45 +648,37 @@ local function PlayHandsUpAnimation()
     local animDict = "amb_misc@world_human_drunk_dancing@male@male_b@idle_a"
     local animName = "idle_b"
 
-   
     RequestAnimDict(animDict)
     while not HasAnimDictLoaded(animDict) do
         Wait(10)
     end
 
-    
     TaskPlayAnim(
         ped,
         animDict,
         animName,
-        8.0,     -- Blend in
-        -8.0,    -- Blend out
-        -1,      -- Duration (-1 = infinite)
-        1,       -- Flag (1 = loop)
+        8.0,
+        -8.0,
+        -1,
+        1,
         0.0,
         false,
         false,
         false
     )
 
-    -- Let it play for 10 seconds
     Wait(10000)
 
-   
     StopAnimTask(ped, animDict, animName, 1.0)
 
     return true
 end
-
-
-
 
 ---------------------------------
 -- PLAYER STATE
 ---------------------------------
 
 local function SetPlayerFrozen(frozen)
-    
     local ped = PlayerPedId()
     SetEntityInvincible(ped, frozen and not Config.CanBeDamaged)
 end
@@ -697,7 +728,7 @@ local function BroadcastToNearby(message, spiritTitle, icon, color, duration)
 end
 
 ---------------------------------
--- END SÉANCE
+-- END SÉANCE (CHANGED)
 ---------------------------------
 
 local function EndSeance(forced)
@@ -708,6 +739,7 @@ local function EndSeance(forced)
     currentSpirit = nil
     isFlickering = false
     targetLightState = false
+    ghostVisible = false -- NEW: reset ghost flag
     
     DismissGhost()
     
@@ -719,7 +751,7 @@ local function EndSeance(forced)
     
     StopSeanceAnimation()
     SetArtificialLightsState(false)
-    SetScreenEffect(false)
+    SetScreenEffect(false) -- CHANGED: this now also clears timecycle
     
     if Config.FreezePlayer then
         SetPlayerFrozen(false)
@@ -764,9 +796,6 @@ local function RunSpiritCommunication()
     SetScreenEffect(true, currentSpirit.type)
     
     local flickerPattern = 'slow'
-    if Config.SpiritEffects and Config.SpiritEffects[currentSpirit.type] then
-        flickerPattern = Config.SpiritEffects[currentSpirit.type].flickerPattern or 'slow'
-    end
     
     SendNotify(
         Config.Messages.contact,
@@ -780,13 +809,12 @@ local function RunSpiritCommunication()
     if not isInSeance then return end
     
     ShowGhostAppearance(currentSpirit.type)
+    -- ghostVisible is now true — no more light flickering until ghost is dismissed
     
     Wait(1000)
     if not isInSeance then return end
     
-    if Config.Flicker and Config.Flicker.onSpiritSpeak then
-        FlickerLightsBlocking(flickerPattern)
-    end
+    -- CHANGED: removed flicker call here — ghost is visible, lights stay stable
     
     local introDuration = SendSpiritNotify(
         currentSpirit.introduction,
@@ -810,6 +838,7 @@ local function RunSpiritCommunication()
         local message = currentSpirit.messages[messageIndex]
         
         if message then
+            -- CHANGED: flicker calls here are now safely blocked by ghostVisible flag
             if Config.Flicker and Config.Flicker.onSpiritSpeak and Config.Timing.flickerDuringMessage then
                 FlickerLightsBlocking(flickerPattern)
             end
@@ -835,6 +864,7 @@ local function RunSpiritCommunication()
             
             if messageIndex > #currentSpirit.messages and messagesShown < maxMessages - 2 then
                 DismissGhost()
+                -- ghostVisible is now false — flickering allowed again
                 
                 SendNotify(
                     Config.Messages.spiritChanges,
@@ -856,18 +886,13 @@ local function RunSpiritCommunication()
                     
                     SetScreenEffect(true, currentSpirit.type)
                     
-                    if Config.SpiritEffects and Config.SpiritEffects[currentSpirit.type] then
-                        flickerPattern = Config.SpiritEffects[currentSpirit.type].flickerPattern or 'gentle'
-                    end
-                    
                     ShowGhostAppearance(currentSpirit.type)
+                    -- ghostVisible is true again — lights stable
                     
                     Wait(1000)
                     if not isInSeance then break end
                     
-                    if Config.Flicker and Config.Flicker.onSpiritSpeak then
-                        FlickerLightsBlocking(flickerPattern)
-                    end
+                    -- CHANGED: removed flicker call — ghost is visible
                     
                     local introD = SendSpiritNotify(
                         currentSpirit.introduction,
@@ -893,6 +918,7 @@ local function RunSpiritCommunication()
     
     if isInSeance then
         DismissGhost()
+        -- ghostVisible is now false — exit flicker plays
         
         FlickerLightsBlocking('slow')
         
@@ -937,6 +963,7 @@ local function StartSeance()
     currentSpirit = nil
     isFlickering = false
     targetLightState = false
+    ghostVisible = false -- NEW: ensure clean state
     
     SendNotify(
         Config.Messages.preparing,
@@ -949,24 +976,19 @@ local function StartSeance()
     Wait(2000)
     if not isInSeance then return end
     
-   
     if not StartSeanceAnimation() then
         isInSeance = false
         SendNotify('Something went wrong...', 'error', Config.Notification.icons.warning, Config.Notification.colors.warning, 3000)
         return
     end
     
-   
     Wait(1500)
     if not isInSeance then return end
     
-   
     SpawnSeanceProps()
     
-   
     StopSeanceAnimation()
     
-   
     PlayHandsUpAnimation()
     
     if not isInSeance then return end
@@ -986,7 +1008,6 @@ local function StartSeance()
     Wait(2000)
     if not isInSeance then return end
     
-   
     if Config.FreezePlayer then
         SetPlayerFrozen(true)
     end
@@ -1267,7 +1288,7 @@ RegisterNetEvent('seance:client:cleanupSyncedProps', function()
 end)
 
 ---------------------------------
--- CLEANUP
+-- CLEANUP (CHANGED)
 ---------------------------------
 
 AddEventHandler('onResourceStop', function(resource)
@@ -1278,13 +1299,16 @@ AddEventHandler('onResourceStop', function(resource)
             currentSpirit = nil
             isFlickering = false
             targetLightState = false
+            ghostVisible = false -- NEW
             StopSeanceAnimation()
-            SetScreenEffect(false)
+            SetScreenEffect(false) -- clears timecycle too
             SetPlayerFrozen(false)
             SetArtificialLightsState(false)
             DeleteSeanceProps()
             DeleteGhost()
         end
+        
+        ClearTimecycle() -- NEW: safety clear
         
         if syncedGhostPed and DoesEntityExist(syncedGhostPed) then
             DeleteEntity(syncedGhostPed)
